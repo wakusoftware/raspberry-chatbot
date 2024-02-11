@@ -1,0 +1,8 @@
+openai~=1.12.0
+python-dotenv~=1.0.1
+langchain~=0.1.6
+PyAudio~=0.2.14
+pydub~=0.25.1
+pygame~=2.5.2
+sounddevice~=0.4.6
+keyboard~=0.13.5
