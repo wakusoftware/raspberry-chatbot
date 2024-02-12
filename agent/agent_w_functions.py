@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import time
@@ -9,6 +10,22 @@ from openai import OpenAI
 from pygame import mixer
 
 load_dotenv()
+
+
+# Example dummy function hard coded to return the same weather
+# In production, this could be your backend API or an external API
+def get_current_weather(location, unit="fahrenheit"):
+    """Get the current weather in a given location"""
+    if "tokyo" in location.lower():
+        return json.dumps({"location": "Tokyo", "temperature": "10", "unit": unit})
+    elif "san francisco" in location.lower():
+        return json.dumps(
+            {"location": "San Francisco", "temperature": "72", "unit": unit}
+        )
+    elif "paris" in location.lower():
+        return json.dumps({"location": "Paris", "temperature": "22", "unit": unit})
+    else:
+        return json.dumps({"location": location, "temperature": "unknown"})
 
 
 class AiAgent:
@@ -25,7 +42,7 @@ class AiAgent:
     def __init__(
         self,
         model: str = "gpt-3.5-turbo",
-        messages_limit: int = 10,
+        messages_limit: int = 12,
         system_prompt: str = "You are a helpful assistant. Always finish your sentences with a '.'",
     ):
         """
@@ -45,6 +62,44 @@ class AiAgent:
         )
         self.model = model
         self.messages_limit = messages_limit
+        self.tools = None
+        self.available_functions = None
+
+    def add_tools(self, tools):
+        """
+        Adds a tool to the list of tools to be used for chat completions.
+
+        Parameters:
+            :param tools: A list of tools to be added to the list of tools.
+        """
+        # self.tools.append(tool)
+        self.tools = tools
+        self.available_functions = {
+            "get_current_weather": get_current_weather,
+        }
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA",
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
 
     def tts(self, text: str):
         """
@@ -168,6 +223,19 @@ class AiAgent:
             if message is not None:
                 print(message, end="")
 
+    def call_ai_function(self, function_name: str, function_arguments: str):
+        # convert function_arguments to a python object
+        function_arguments = json.loads(function_arguments)
+
+        match function_name:
+
+            case "get_current_weather":
+                if not function_arguments["location"]:
+                    raise ValueError("Location is required for get_current_weather")
+                unit = function_arguments.get("unit") or "fahrenheit"
+                response = get_current_weather(function_arguments["location"], unit)
+                return response
+
     def stream_text_with_audio(self, user_input: str):
         """
         Streams text responses from the AI model and uses text-to-speech to audibly play back complete sentences.
@@ -178,6 +246,9 @@ class AiAgent:
         """
         accumulated_text = ""  # Initialize an empty string to accumulate text# Add the user input to the messages array
         complete_answer = ""
+        function_name = ""
+        function_arguments = ""
+        tool_call_id = ""
         self.messages.append({"role": "user", "content": user_input})
 
         # Ensure messages do not exceed the limit, preserving the system message at index 0
@@ -192,15 +263,88 @@ class AiAgent:
             messages=self.messages,
             temperature=0,
             stream=True,  # again, we set stream=True
-            # tools=self.tools,
+            tools=self.tools,
         ):
 
+            print("chunk choices: ", chunk.choices)
+            print("choices length: ", len(chunk.choices))
+            print("finish reason: ", chunk.choices[0].finish_reason)
+
             message = chunk.choices[0].delta.content
+            tool_calls = chunk.choices[0].delta.tool_calls
+
+            if tool_calls is not None:
+                print("message for function: ", chunk.choices[0].delta)
+
+                if len(function_name) == 0:
+                    function_name = tool_calls[0].function.name
+                    tool_call_id = tool_calls[0].id
+
+                function_arguments += tool_calls[0].function.arguments
+
+            if chunk.choices[0].finish_reason == "tool_calls":
+                function_response = self.call_ai_function(
+                    function_name, function_arguments
+                )
+                print("function_response: ", function_response)
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id,
+                                "function": {
+                                    "name": function_name,
+                                    "arguments": function_arguments,
+                                },
+                                "type": "function",
+                            }
+                        ],
+                    }
+                )
+                self.messages.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": function_response,
+                    }
+                )
+                tool_call_id = ""
+                function_name = ""
+                function_arguments = ""
+                print("messages so far: ", self.messages)
+
+                # Second call after the function response
+                for chunk in self.client.chat.completions.create(
+                    model=self.model,
+                    messages=self.messages,
+                    temperature=0,
+                    stream=True,  # again, we set stream=True
+                    # tools=self.tools,
+                ):
+
+                    message = chunk.choices[0].delta.content
+
+                    if message is not None:
+                        accumulated_text += message  # Accumulate text from each chunk
+                        complete_answer += message  # Accumulate text from each chunk
+                        print("mensaje: ", message, end="")
+
+                        # Check if the accumulated text contains a complete sentence
+                        if any(punct in accumulated_text for punct in ".!?"):
+                            self.tts(accumulated_text)
+                            accumulated_text = ""
+
+                # Add the AI response to the messages array
+                print("complete_answer: ", complete_answer)
+                self.messages.append({"role": "assistant", "content": complete_answer})
 
             if message is not None:
                 accumulated_text += message  # Accumulate text from each chunk
                 complete_answer += message  # Accumulate text from each chunk
-                print("mensaje: ", message, end="")
+                # print("mensaje: ", message, end="")
 
                 # Check if the accumulated text contains a complete sentence
                 if any(punct in accumulated_text for punct in ".!?"):
@@ -208,12 +352,14 @@ class AiAgent:
                     accumulated_text = ""
 
         # Add the AI response to the messages array
-        print("complete_answer: ", complete_answer)
+        # print("complete_answer: ", complete_answer)
         self.messages.append({"role": "assistant", "content": complete_answer})
 
 
 if __name__ == "__main__":
     agent = AiAgent()
+    agent.add_tools(["get_current_weather"])
+    print(agent.tools)
     # agent.text_streaming(
     #     "tell me a story about a dragon and a knight who becomes friends."
     # )
